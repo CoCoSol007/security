@@ -1,0 +1,11 @@
+[package]
+name = "security"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.43"
+crossbeam-channel = "0.5.15"
+eframe = "0.33.3"
+ffmpeg-next = "8.0.0"
+image = "0.25.9"
