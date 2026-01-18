@@ -9,3 +9,5 @@ crossbeam-channel = "0.5.15"
 eframe = "0.33.3"
 ffmpeg-next = "8.0.0"
 image = "0.25.9"
+serde = {version = "1.0.228", features = ["derive"]}
+toml = "0.9.11"

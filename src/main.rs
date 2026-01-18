@@ -1,12 +1,14 @@
 use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui::{self, ahash::HashMap};
 use ffmpeg_next::{self as ffmpeg};
+use serde::Deserialize;
 use std::thread;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
 
 struct VideoApp {
+    config: RootConfig,
     current_url: String,
     running_sender: HashMap<String, crossbeam_channel::Sender<bool>>,
     packet_receiver: Receiver<VideoFrame>,
@@ -26,13 +28,36 @@ struct VideoFrame {
     url: String,
 }
 
-const PATHS: [&str; 3] = [
-    "rtsp://127.0.0.1:8554/mystream",
-    "rtsp://127.0.0.1:8554/mystream2",
-    "rtsp://127.0.0.1:8554/mystream3",
-];
+#[derive(Deserialize, Debug)]
+struct Config {
+    has_to_wait_for_keyframe: bool,
+}
 
-const NAMES: [&str; 3] = ["Camera 1", "Camera 2", "Camera 3"];
+#[derive(Deserialize, Debug)]
+struct Camera {
+    name: String,
+    url: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct RootConfig {
+    config: Config,
+    camera: Vec<Camera>,
+}
+
+impl RootConfig {
+    fn get_camera_urls(&self) -> Vec<String> {
+        self.camera.iter().map(|cam| cam.url.clone()).collect()
+    }
+
+    fn get_camera_names(&self) -> Vec<String> {
+        self.camera.iter().map(|cam| cam.name.clone()).collect()
+    }
+
+    fn get_first_camera_url(&self) -> Option<String> {
+        self.camera.first().map(|cam| cam.url.clone())
+    }
+}
 
 impl VideoApp {
     fn switch_stream(&mut self, new_url: &str) {
@@ -49,35 +74,41 @@ impl VideoApp {
     }
 
     fn next_camera(&mut self) {
-        let current_index = PATHS
+        let current_index = self
+            .config
+            .get_camera_urls()
             .iter()
-            .position(|&p| p == self.current_url)
+            .position(|p| p == &self.current_url)
             .unwrap_or(0);
-        let next_index = (current_index + 1) % PATHS.len();
-        self.switch_stream(PATHS[next_index]);
+        let next_index = (current_index + 1) % self.config.get_camera_urls().len();
+        self.switch_stream(&self.config.get_camera_urls()[next_index]);
     }
 
     fn previous_camera(&mut self) {
-        let current_index = PATHS
+        let current_index = self
+            .config
+            .get_camera_urls()
             .iter()
-            .position(|&p| p == self.current_url)
+            .position(|p| p == &self.current_url)
             .unwrap_or(0);
         let next_index = if current_index == 0 {
-            PATHS.len() - 1
+            self.config.get_camera_urls().len() - 1
         } else {
             current_index - 1
         };
-        self.switch_stream(PATHS[next_index]);
+        self.switch_stream(&self.config.get_camera_urls()[next_index]);
     }
 
     fn take_snapshot(&self, frame: &VideoFrame) {
         let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-        let num = PATHS
+        let num = self
+            .config
+            .get_camera_urls()
             .iter()
-            .position(|&p| p == self.current_url)
+            .position(|p| p == &self.current_url)
             .unwrap_or(0);
 
-        let cam_name = NAMES[num]
+        let cam_name = self.config.get_camera_names()[num]
             .replace("://", "_")
             .replace("/", "_")
             .replace(".", "_");
@@ -92,29 +123,37 @@ impl VideoApp {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    let content = std::fs::read_to_string("config.toml").expect("Impossible de lire le fichier");
+    let parsed: RootConfig = toml::from_str(&content).expect("Impossible de parser le fichier");
+
     let (packet_sender, packet_receiver) = unbounded::<VideoFrame>();
 
     let mut video_app = VideoApp {
-        current_url: PATHS[0].to_string(),
+        current_url: parsed.get_first_camera_url().unwrap_or_default(),
         running_sender: HashMap::default(),
         packet_receiver: packet_receiver.clone(),
         texture: None,
         notification_timer: None,
+        config: parsed,
     };
 
-    for path in PATHS.iter() {
+    for path in video_app.config.get_camera_urls().iter() {
         let sender_clone = packet_sender.clone();
         let path_string = path.to_string();
         let (stop_sender, stop_receiver) = unbounded::<bool>();
+        let running = path_string == video_app.current_url;
 
         thread::spawn(move || {
             let video_stream = VideoStream {
                 url: path_string.clone(),
                 packet_sender: sender_clone.clone(),
                 stop_receiver,
-                running: path_string == PATHS[0],
+                running,
             };
-            let _ = run_decoder_managed(video_stream);
+            let _ = run_decoder_managed(
+                video_stream,
+                video_app.config.config.has_to_wait_for_keyframe,
+            );
         });
 
         video_app
@@ -276,14 +315,17 @@ impl eframe::App for VideoApp {
                     });
             });
 
-        let cam_index = PATHS
+        let cam_index = self
+            .config
+            .get_camera_urls()
             .iter()
-            .position(|&p| p == self.current_url)
+            .position(|p| p == &self.current_url)
             .unwrap_or(0);
-        let cam_name = NAMES[cam_index];
+        let cam_name = self.config.get_camera_names()[cam_index].clone();
 
         egui::Area::new("camera_name_overlay".into())
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-10.0, 10.0))
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 10.0))
+            .pivot(egui::Align2::CENTER_TOP) // Garde le centre comme point d'ancrage
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
@@ -291,12 +333,14 @@ impl eframe::App for VideoApp {
                     .inner_margin(16.0)
                     .corner_radius(15.0)
                     .show(ui, |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                        ui.set_min_width(0.0);
                         ui.label(
                             egui::RichText::new(cam_name)
                                 .color(egui::Color32::WHITE)
                                 .strong()
                                 .size(32.0),
-                        );
+                        )
                     });
             });
 
@@ -324,7 +368,10 @@ impl eframe::App for VideoApp {
     }
 }
 
-fn run_decoder_managed(video_stream: VideoStream) -> Result<(), ffmpeg::Error> {
+fn run_decoder_managed(
+    video_stream: VideoStream,
+    has_to_wait_for_keyframe: bool,
+) -> Result<(), ffmpeg::Error> {
     let mut running = video_stream.running;
     let mut waiting_for_keyframe = true;
 
@@ -363,11 +410,11 @@ fn run_decoder_managed(video_stream: VideoStream) -> Result<(), ffmpeg::Error> {
             }
 
             if stream.index() == video_index && running {
-                if waiting_for_keyframe {
-                    if packet.is_key() {
-                        waiting_for_keyframe = false;
-                    } else {
+                if has_to_wait_for_keyframe && waiting_for_keyframe {
+                    if !packet.is_key() {
                         continue;
+                    } else {
+                        waiting_for_keyframe = false;
                     }
                 }
 

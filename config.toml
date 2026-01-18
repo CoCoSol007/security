@@ -1,0 +1,11 @@
+[config]
+has_to_wait_for_keyframe = true
+
+[[camera]]
+name = "OBS stream input"
+url = "rtsp://localhost:8554/mystream"
+
+[[camera]]
+name = "Video"
+url = "rtsp://localhost:8554/mystream2"
+
