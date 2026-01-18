@@ -174,6 +174,17 @@ fn main() -> Result<(), eframe::Error> {
 
 impl eframe::App for VideoApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.input(|i| {
+            let should_quit = i.events.iter().any(|e| match e {
+                egui::Event::Key { key, pressed, .. } => *pressed && *key == egui::Key::Q,
+                _ => false,
+            });
+
+            if should_quit {
+                std::process::exit(0);
+            }
+        });
+
         let mut latest_data = None;
         while let Ok(data) = self.packet_receiver.try_recv() {
             if self.current_url != data.url {
@@ -325,7 +336,7 @@ impl eframe::App for VideoApp {
 
         egui::Area::new("camera_name_overlay".into())
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 10.0))
-            .pivot(egui::Align2::CENTER_TOP) // Garde le centre comme point d'ancrage
+            .pivot(egui::Align2::CENTER_TOP)
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
