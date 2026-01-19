@@ -31,6 +31,7 @@ struct VideoFrame {
 #[derive(Deserialize, Debug)]
 struct Config {
     has_to_wait_for_keyframe: bool,
+    capture_path: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -112,7 +113,10 @@ impl VideoApp {
             .replace("://", "_")
             .replace("/", "_")
             .replace(".", "_");
-        let filename = format!("{}_{}.png", cam_name, timestamp);
+        let filename = format!(
+            "{}/{}_{}.png",
+            self.config.config.capture_path, cam_name, timestamp
+        );
 
         if let Some(img_buffer) =
             image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, frame.data.clone())
