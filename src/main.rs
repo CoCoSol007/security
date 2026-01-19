@@ -14,6 +14,10 @@ struct VideoApp {
     packet_receiver: Receiver<VideoFrame>,
     texture: Option<egui::TextureHandle>,
     notification_timer: Option<std::time::Instant>,
+    show_gallery: bool,
+    gallery_images: Vec<std::path::PathBuf>,
+    gallery_index: usize,
+    gallery_texture: Option<egui::TextureHandle>,
 }
 
 struct VideoStream {
@@ -124,6 +128,77 @@ impl VideoApp {
             let _ = img_buffer.save(&filename);
         }
     }
+
+    fn open_gallery(&mut self) {
+        self.gallery_images = match std::fs::read_dir(&self.config.config.capture_path) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|d| d.path()))
+                .filter(|p| {
+                    if let Some(ext) = p.extension() {
+                        match ext.to_string_lossy().to_lowercase().as_str() {
+                            "png" | "jpg" | "jpeg" => true,
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    }
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+
+        self.gallery_images.sort();
+        self.gallery_images.reverse();
+        self.gallery_index = 0;
+        self.show_gallery = true;
+        self.gallery_texture = None;
+    }
+
+    fn load_gallery_texture(&mut self, ctx: &egui::Context) {
+        if self.gallery_images.is_empty() {
+            self.gallery_texture = None;
+            return;
+        }
+
+        if let Some(path) = self.gallery_images.get(self.gallery_index) {
+            if let Ok(img) = image::open(path) {
+                let img = img.to_rgba8();
+                let size = [img.width() as usize, img.height() as usize];
+                let pixels = img.into_raw();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+                let id = format!("gallery:{}", path.display());
+                self.gallery_texture =
+                    Some(ctx.load_texture(&id, color_image, egui::TextureOptions::LINEAR));
+            } else {
+                self.gallery_texture = None;
+            }
+        }
+    }
+
+    fn gallery_next(&mut self) {
+        if self.gallery_images.is_empty() {
+            return;
+        }
+        self.gallery_index = (self.gallery_index + 1) % self.gallery_images.len();
+        self.gallery_texture = None;
+    }
+
+    fn gallery_previous(&mut self) {
+        if self.gallery_images.is_empty() {
+            return;
+        }
+        if self.gallery_index == 0 {
+            self.gallery_index = self.gallery_images.len() - 1;
+        } else {
+            self.gallery_index -= 1;
+        }
+        self.gallery_texture = None;
+    }
+
+    fn close_gallery(&mut self) {
+        self.show_gallery = false;
+        self.gallery_texture = None;
+    }
 }
 
 fn main() -> Result<(), eframe::Error> {
@@ -139,6 +214,10 @@ fn main() -> Result<(), eframe::Error> {
         texture: None,
         notification_timer: None,
         config: parsed,
+        show_gallery: false,
+        gallery_images: Vec::new(),
+        gallery_index: 0,
+        gallery_texture: None,
     };
 
     for path in video_app.config.get_camera_urls().iter() {
@@ -210,23 +289,48 @@ impl eframe::App for VideoApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
             .show(ctx, |ui| {
-                if let Some(texture) = &self.texture {
-                    let available = ui.available_size();
-                    let image_size = texture.size_vec2();
-                    let image_ratio = image_size.x / image_size.y;
-                    let final_size = if (available.x / available.y) > image_ratio {
-                        egui::vec2(available.y * image_ratio, available.y)
-                    } else {
-                        egui::vec2(available.x, available.x / image_ratio)
-                    };
+                if self.show_gallery {
+                    if self.gallery_texture.is_none() {
+                        self.load_gallery_texture(ctx);
+                    }
 
-                    ui.centered_and_justified(|ui| {
-                        ui.add(egui::Image::new(texture).fit_to_exact_size(final_size));
-                    });
+                    if let Some(texture) = &self.gallery_texture {
+                        let available = ui.available_size();
+                        let image_size = texture.size_vec2();
+                        let image_ratio = image_size.x / image_size.y;
+                        let final_size = if (available.x / available.y) > image_ratio {
+                            egui::vec2(available.y * image_ratio, available.y)
+                        } else {
+                            egui::vec2(available.x, available.x / image_ratio)
+                        };
+
+                        ui.centered_and_justified(|ui| {
+                            ui.add(egui::Image::new(texture).fit_to_exact_size(final_size));
+                        });
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("Aucune image trouvée dans le dossier de capture");
+                        });
+                    }
                 } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.add(egui::Spinner::new().size(64.0));
-                    });
+                    if let Some(texture) = &self.texture {
+                        let available = ui.available_size();
+                        let image_size = texture.size_vec2();
+                        let image_ratio = image_size.x / image_size.y;
+                        let final_size = if (available.x / available.y) > image_ratio {
+                            egui::vec2(available.y * image_ratio, available.y)
+                        } else {
+                            egui::vec2(available.x, available.x / image_ratio)
+                        };
+
+                        ui.centered_and_justified(|ui| {
+                            ui.add(egui::Image::new(texture).fit_to_exact_size(final_size));
+                        });
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.add(egui::Spinner::new().size(64.0));
+                        });
+                    }
                 }
             });
 
@@ -265,11 +369,16 @@ impl eframe::App for VideoApp {
                                 );
 
                                 if resp.clicked() {
-                                    self.previous_camera();
+                                    if self.show_gallery {
+                                        self.gallery_previous();
+                                        self.load_gallery_texture(ctx);
+                                    } else {
+                                        self.previous_camera();
+                                    }
                                 }
                             }
 
-                            {
+                            if !self.show_gallery {
                                 let (rect, resp) =
                                     ui.allocate_exact_size(btn_size, egui::Sense::click());
 
@@ -295,9 +404,41 @@ impl eframe::App for VideoApp {
                                 );
 
                                 if resp.clicked() {
-                                    if let Some(data) = latest_data {
-                                        self.take_snapshot(&data);
-                                        self.notification_timer = Some(std::time::Instant::now());
+                                    if !self.show_gallery {
+                                        if let Some(data) = latest_data {
+                                            self.take_snapshot(&data);
+                                            self.notification_timer =
+                                                Some(std::time::Instant::now());
+                                        }
+                                    }
+                                }
+                            }
+                            {
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(btn_size, egui::Sense::click());
+
+                                if resp.hovered() {
+                                    ui.painter().circle_filled(
+                                        rect.center(),
+                                        50.0,
+                                        egui::Color32::from_white_alpha(20),
+                                    );
+                                }
+
+                                ui.painter().text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    if self.show_gallery { "❌" } else { "🖼" },
+                                    egui::FontId::proportional(48.0),
+                                    egui::Color32::WHITE,
+                                );
+
+                                if resp.clicked() {
+                                    if self.show_gallery {
+                                        self.close_gallery();
+                                    } else {
+                                        self.open_gallery();
+                                        self.load_gallery_texture(ctx);
                                     }
                                 }
                             }
@@ -323,7 +464,12 @@ impl eframe::App for VideoApp {
                                 );
 
                                 if resp.clicked() {
-                                    self.next_camera();
+                                    if self.show_gallery {
+                                        self.gallery_next();
+                                        self.load_gallery_texture(ctx);
+                                    } else {
+                                        self.next_camera();
+                                    }
                                 }
                             }
                         });
