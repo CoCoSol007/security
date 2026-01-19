@@ -1,6 +1,7 @@
 [config]
 has_to_wait_for_keyframe = true
 capture_path = "/home/cocosol/Pictures/capture"
+cursor_visible = false
 
 [[camera]]
 name = "OBS stream input"

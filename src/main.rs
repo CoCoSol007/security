@@ -36,6 +36,7 @@ struct VideoFrame {
 struct Config {
     has_to_wait_for_keyframe: bool,
     capture_path: String,
+    cursor_visible: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -266,6 +267,14 @@ impl eframe::App for VideoApp {
             if should_quit {
                 std::process::exit(0);
             }
+        });
+
+        ctx.output_mut(|o| {
+            o.cursor_icon = if self.config.config.cursor_visible {
+                egui::CursorIcon::Default
+            } else {
+                egui::CursorIcon::None
+            };
         });
 
         let mut latest_data = None;
