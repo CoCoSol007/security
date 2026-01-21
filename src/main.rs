@@ -1,5 +1,6 @@
 use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui::{self, ahash::HashMap};
+use ffmpeg_next::Dictionary;
 use ffmpeg_next::{self as ffmpeg};
 use serde::Deserialize;
 use std::thread;
@@ -37,6 +38,7 @@ struct Config {
     has_to_wait_for_keyframe: bool,
     capture_path: String,
     cursor_visible: bool,
+    use_tcp_for_rtsp: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -237,6 +239,7 @@ fn main() -> Result<(), eframe::Error> {
             let _ = run_decoder_managed(
                 video_stream,
                 video_app.config.config.has_to_wait_for_keyframe,
+                video_app.config.config.use_tcp_for_rtsp,
             );
         });
 
@@ -292,7 +295,6 @@ impl eframe::App for VideoApp {
             );
             self.texture =
                 Some(ctx.load_texture("video_frame", color_image, egui::TextureOptions::LINEAR));
-            ctx.request_repaint();
         }
 
         egui::CentralPanel::default()
@@ -529,24 +531,28 @@ impl eframe::App for VideoApp {
                     egui::Id::new("flash_layer"),
                 ))
                 .rect_filled(rect, 0.0, egui::Color32::from_white_alpha(alpha));
-
-                ctx.request_repaint();
             } else {
                 self.notification_timer = None;
             }
         }
+        ctx.request_repaint();
     }
 }
-
 fn run_decoder_managed(
     video_stream: VideoStream,
     has_to_wait_for_keyframe: bool,
+    use_tcp_for_rtsp: bool,
 ) -> Result<(), ffmpeg::Error> {
     let mut running = video_stream.running;
     let mut waiting_for_keyframe = true;
 
     loop {
-        let mut ictx = match ffmpeg::format::input(&video_stream.url) {
+        let mut opts = Dictionary::new();
+        if use_tcp_for_rtsp {
+            opts.set("rtsp_transport", "tcp");
+        }
+
+        let mut ictx = match ffmpeg::format::input_with_dictionary(&video_stream.url, opts) {
             Ok(ctx) => ctx,
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -588,23 +594,17 @@ fn run_decoder_managed(
                     }
                 }
 
-                let _ = decoder.send_packet(&packet);
-                while decoder.receive_frame(&mut frame).is_ok() {
-                    let _ = scaler.run(&frame, &mut frame_rgba);
-                    if video_stream
-                        .packet_sender
-                        .send(VideoFrame {
+                if decoder.send_packet(&packet).is_ok() {
+                    while decoder.receive_frame(&mut frame).is_ok() {
+                        let _ = scaler.run(&frame, &mut frame_rgba);
+
+                        let _ = video_stream.packet_sender.try_send(VideoFrame {
                             data: frame_rgba.data(0).to_vec(),
                             url: video_stream.url.clone(),
-                        })
-                        .is_err()
-                    {
-                        return Ok(());
+                        });
                     }
                 }
             }
         }
-
-        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 }

@@ -1,13 +1,9 @@
 [config]
 has_to_wait_for_keyframe = true
 capture_path = "/home/cocosol/Pictures/capture"
-cursor_visible = false
+cursor_visible = true
+use_tcp_for_rtsp = false
 
 [[camera]]
 name = "OBS stream input"
 url = "rtsp://localhost:8554/mystream"
-
-[[camera]]
-name = "Video"
-url = "rtsp://localhost:8554/mystream2"
-
