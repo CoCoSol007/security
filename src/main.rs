@@ -352,12 +352,12 @@ impl eframe::App for VideoApp {
         let capture_radius = 44.0;
 
         egui::Area::new("controls".into())
-            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -30.0))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -10.0))
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(egui::Color32::from_black_alpha(170))
                     .corner_radius(50.0)
-                    .inner_margin(egui::Margin::symmetric(35, 18))
+                    .inner_margin(egui::Margin::symmetric(5, 2))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 40.0;
