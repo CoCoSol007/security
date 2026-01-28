@@ -108,28 +108,31 @@ impl VideoApp {
     }
 
     fn take_snapshot(&self, frame: &VideoFrame) {
-        let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-        let num = self
-            .config
-            .get_camera_urls()
-            .iter()
-            .position(|p| p == &self.current_url)
-            .unwrap_or(0);
+        let data = frame.data.clone();
+        let capture_path = self.config.config.capture_path.clone();
+        let current_url = self.current_url.clone();
+        
+        let num = self.config.get_camera_urls().iter().position(|p| p == &current_url).unwrap_or(0);
+        let raw_cam_name = self.config.get_camera_names()[num].clone();
 
-        let cam_name = self.config.get_camera_names()[num]
-            .replace("://", "_")
-            .replace("/", "_")
-            .replace(".", "_");
-        let filename = format!(
-            "{}/{}_{}.png",
-            self.config.config.capture_path, cam_name, timestamp
-        );
+        thread::spawn(move || {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+            
+            let cam_name = raw_cam_name
+                .replace("://", "_")
+                .replace("/", "_")
+                .replace(".", "_");
 
-        if let Some(img_buffer) =
-            image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, frame.data.clone())
-        {
-            let _ = img_buffer.save(&filename);
-        }
+            let filename = format!("{}/{}_{}.png", capture_path, timestamp, cam_name);
+
+            if let Some(img_buffer) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, data) {
+                if let Err(e) = img_buffer.save(&filename) {
+                    eprintln!("Erreur lors de la sauvegarde de l'image : {}", e);
+                }
+            } else {
+                eprintln!("Échec de la création du buffer d'image");
+            }
+        });
     }
 
     fn open_gallery(&mut self) {
@@ -486,6 +489,10 @@ impl eframe::App for VideoApp {
                         });
                     });
             });
+
+        if self.show_gallery {
+            return;
+        }
 
         let cam_index = self
             .config
