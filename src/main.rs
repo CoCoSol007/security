@@ -348,8 +348,8 @@ impl eframe::App for VideoApp {
                 }
             });
 
-        let btn_size = egui::vec2(100.0, 100.0);
-        let capture_radius = 34.0;
+        let btn_size = egui::vec2(130.0, 130.0);
+        let capture_radius = 44.0;
 
         egui::Area::new("controls".into())
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -30.0))
@@ -545,6 +545,7 @@ impl eframe::App for VideoApp {
         ctx.request_repaint();
     }
 }
+
 fn run_decoder_managed(
     video_stream: VideoStream,
     has_to_wait_for_keyframe: bool,
