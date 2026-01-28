@@ -571,20 +571,30 @@ fn run_decoder_managed(
         let video_index = input.index();
 
         let codec_name = "h264_v4l2m2m";
-        
-        let context = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
-        let mut decoder = context.decoder().video()?;
-        
-        // 2. Si on a trouvé le codec matériel, on l'utilise
-        if let Some(hw_codec) = ffmpeg::decoder::find_by_name(codec_name) {
-            decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?
-                .decoder()
-                .open_as(hw_codec)?
-                .video()?;
-            println!("Utilisation du décodage matériel avec le codec : {}", codec_name);
-        } else {
-            println!("Codec matériel '{}' non trouvé, utilisation du décodage logiciel.", codec_name);
-        }
+        let params = input.parameters();
+
+        let mut decoder = match ffmpeg::decoder::find_by_name(codec_name) {
+            Some(hw_codec) => {
+                match ffmpeg::codec::context::Context::from_parameters(params.clone())?
+                    .decoder()
+                    .open_as(hw_codec)
+                    .and_then(|c| c.video()) 
+                {
+                    Ok(hw_dec) => {
+                        println!("Matériel : h264_v4l2m2m");
+                        hw_dec
+                    },
+                    Err(_) => {
+                        println!("Échec matériel (Device non trouvé), repli logiciel...");
+                        ffmpeg::codec::context::Context::from_parameters(params)?.decoder().video()?
+                    }
+                }
+            },
+            None => {
+                println!("Codec {} non trouvé, usage logiciel.", codec_name);
+                ffmpeg::codec::context::Context::from_parameters(params)?.decoder().video()?
+            }
+        };
                 
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
