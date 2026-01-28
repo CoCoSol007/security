@@ -569,8 +569,23 @@ fn run_decoder_managed(
 
         let input = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
         let video_index = input.index();
+
+        let codec_name = "h264_v4l2m2m";
+        
         let context = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
         let mut decoder = context.decoder().video()?;
+        
+        // 2. Si on a trouvé le codec matériel, on l'utilise
+        if let Some(hw_codec) = ffmpeg::decoder::find_by_name(codec_name) {
+            decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?
+                .decoder()
+                .open_as(hw_codec)?
+                .video()?;
+            println!("Utilisation du décodage matériel avec le codec : {}", codec_name);
+        } else {
+            println!("Codec matériel '{}' non trouvé, utilisation du décodage logiciel.", codec_name);
+        }
+                
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
