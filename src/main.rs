@@ -559,6 +559,8 @@ fn run_decoder_managed(
         if use_tcp_for_rtsp {
             opts.set("rtsp_transport", "tcp");
         }
+        opts.set("probesize", "32");
+        opts.set("analyzeduration", "0");
 
         let mut ictx = match ffmpeg::format::input_with_dictionary(&video_stream.url, opts) {
             Ok(ctx) => ctx,
@@ -570,33 +572,17 @@ fn run_decoder_managed(
 
         let input = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
         let video_index = input.index();
-
-        let codec_name = "h264_v4l2m2m";
         let params = input.parameters();
 
-        let mut decoder = match ffmpeg::decoder::find_by_name(codec_name) {
-            Some(hw_codec) => {
-                match ffmpeg::codec::context::Context::from_parameters(params.clone())?
-                    .decoder()
-                    .open_as(hw_codec)
-                    .and_then(|c| c.video()) 
-                {
-                    Ok(hw_dec) => {
-                        println!("Matériel : h264_v4l2m2m");
-                        hw_dec
-                    },
-                    Err(_) => {
-                        println!("Échec matériel (Device non trouvé), repli logiciel...");
-                        ffmpeg::codec::context::Context::from_parameters(params)?.decoder().video()?
-                    }
-                }
-            },
-            None => {
-                println!("Codec {} non trouvé, usage logiciel.", codec_name);
-                ffmpeg::codec::context::Context::from_parameters(params)?.decoder().video()?
-            }
+        let decoder_context = ffmpeg::codec::context::Context::from_parameters(params.clone())?;
+        let mut decoder = if let Some(hw_codec) = ffmpeg::decoder::find_by_name("h264_v4l2m2m") {
+            println!("Utilisation du décodeur matériel : h264_v4l2m2m");
+            decoder_context.decoder().open_as(hw_codec).and_then(|c| c.video())?
+        } else {
+            println!("Repli logiciel (libavcodec)");
+            decoder_context.decoder().video()?
         };
-                
+
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
@@ -604,7 +590,7 @@ fn run_decoder_managed(
             ffmpeg::format::Pixel::RGBA,
             WIDTH,
             HEIGHT,
-            ffmpeg::software::scaling::flag::Flags::BILINEAR,
+            ffmpeg::software::scaling::flag::Flags::POINT, 
         )?;
 
         let mut frame = ffmpeg::util::frame::video::Video::empty();
@@ -612,29 +598,29 @@ fn run_decoder_managed(
 
         for (stream, packet) in ictx.packets() {
             if let Ok(value) = video_stream.stop_receiver.try_recv() {
-                if value && !running {
-                    waiting_for_keyframe = true;
-                }
+                if value && !running { waiting_for_keyframe = true; }
                 running = value;
             }
 
             if stream.index() == video_index && running {
                 if has_to_wait_for_keyframe && waiting_for_keyframe {
-                    if !packet.is_key() {
-                        continue;
-                    } else {
-                        waiting_for_keyframe = false;
-                    }
+                    if !packet.is_key() { continue; }
+                    waiting_for_keyframe = false;
                 }
 
                 if decoder.send_packet(&packet).is_ok() {
                     while decoder.receive_frame(&mut frame).is_ok() {
                         let _ = scaler.run(&frame, &mut frame_rgba);
 
-                        let _ = video_stream.packet_sender.try_send(VideoFrame {
-                            data: frame_rgba.data(0).to_vec(),
+                        let frame_data = frame_rgba.data(0).to_vec();
+
+                        let result = video_stream.packet_sender.try_send(VideoFrame {
+                            data: frame_data,
                             url: video_stream.url.clone(),
                         });
+                        if result.is_err() {
+                            println!("Le canal de paquets est plein, saut de la trame");                           
+                        }
                     }
                 }
             }
