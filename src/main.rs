@@ -111,13 +111,18 @@ impl VideoApp {
         let data = frame.data.clone();
         let capture_path = self.config.config.capture_path.clone();
         let current_url = self.current_url.clone();
-        
-        let num = self.config.get_camera_urls().iter().position(|p| p == &current_url).unwrap_or(0);
+
+        let num = self
+            .config
+            .get_camera_urls()
+            .iter()
+            .position(|p| p == &current_url)
+            .unwrap_or(0);
         let raw_cam_name = self.config.get_camera_names()[num].clone();
 
         thread::spawn(move || {
             let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-            
+
             let cam_name = raw_cam_name
                 .replace("://", "_")
                 .replace("/", "_")
@@ -125,7 +130,9 @@ impl VideoApp {
 
             let filename = format!("{}/{}_{}.png", capture_path, timestamp, cam_name);
 
-            if let Some(img_buffer) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, data) {
+            if let Some(img_buffer) =
+                image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, data)
+            {
                 if let Err(e) = img_buffer.save(&filename) {
                     eprintln!("Erreur lors de la sauvegarde de l'image : {}", e);
                 }
@@ -577,40 +584,66 @@ fn run_decoder_managed(
         let decoder_context = ffmpeg::codec::context::Context::from_parameters(params.clone())?;
         let mut decoder = if let Some(hw_codec) = ffmpeg::decoder::find_by_name("h264_v4l2m2m") {
             println!("Utilisation du décodeur matériel : h264_v4l2m2m");
-            decoder_context.decoder().open_as(hw_codec).and_then(|c| c.video())?
+            decoder_context
+                .decoder()
+                .open_as(hw_codec)
+                .and_then(|c| c.video())?
         } else {
             println!("Repli logiciel (libavcodec)");
             decoder_context.decoder().video()?
         };
 
-        let mut scaler = ffmpeg::software::scaling::context::Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            ffmpeg::format::Pixel::RGBA,
-            WIDTH,
-            HEIGHT,
-            ffmpeg::software::scaling::flag::Flags::POINT, 
-        )?;
+        let mut scaler: Option<ffmpeg::software::scaling::context::Context> = None;
 
         let mut frame = ffmpeg::util::frame::video::Video::empty();
         let mut frame_rgba = ffmpeg::util::frame::video::Video::empty();
 
         for (stream, packet) in ictx.packets() {
             if let Ok(value) = video_stream.stop_receiver.try_recv() {
-                if value && !running { waiting_for_keyframe = true; }
+                if value && !running {
+                    waiting_for_keyframe = true;
+                }
                 running = value;
             }
 
             if stream.index() == video_index && running {
                 if has_to_wait_for_keyframe && waiting_for_keyframe {
-                    if !packet.is_key() { continue; }
+                    if !packet.is_key() {
+                        continue;
+                    }
                     waiting_for_keyframe = false;
                 }
 
                 if decoder.send_packet(&packet).is_ok() {
                     while decoder.receive_frame(&mut frame).is_ok() {
-                        let _ = scaler.run(&frame, &mut frame_rgba);
+                        if scaler.is_none() {
+                            if frame.width() > 0 && frame.height() > 0 {
+                                scaler = Some(ffmpeg::software::scaling::context::Context::get(
+                                    frame.format(),
+                                    frame.width(),
+                                    frame.height(),
+                                    ffmpeg::format::Pixel::RGBA,
+                                    WIDTH,
+                                    HEIGHT,
+                                    ffmpeg::software::scaling::flag::Flags::POINT,
+                                )?);
+                                println!(
+                                    "Scaler initialisé : {}x{} -> {}x{}",
+                                    frame.width(),
+                                    frame.height(),
+                                    WIDTH,
+                                    HEIGHT
+                                );
+                            } else {
+                                continue;
+                            }
+                        }
+
+                        let Some(ref mut valid_scaler) = scaler else {
+                            continue;
+                        };
+
+                        let _ = valid_scaler.run(&frame, &mut frame_rgba);
 
                         let frame_data = frame_rgba.data(0).to_vec();
 
@@ -619,7 +652,7 @@ fn run_decoder_managed(
                             url: video_stream.url.clone(),
                         });
                         if result.is_err() {
-                            println!("Le canal de paquets est plein, saut de la trame");                           
+                            println!("Le canal de paquets est plein, saut de la trame");
                         }
                     }
                 }
