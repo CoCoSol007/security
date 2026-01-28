@@ -566,8 +566,11 @@ fn run_decoder_managed(
         if use_tcp_for_rtsp {
             opts.set("rtsp_transport", "tcp");
         }
-        opts.set("probesize", "32");
-        opts.set("analyzeduration", "0");
+        let mut opts = Dictionary::new();
+        opts.set("rtsp_transport", "tcp");
+        opts.set("probesize", "5000000"); 
+        opts.set("analyzeduration", "1000000");
+        opts.set("stimeout", "5000000");
 
         let mut ictx = match ffmpeg::format::input_with_dictionary(&video_stream.url, opts) {
             Ok(ctx) => ctx,
