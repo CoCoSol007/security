@@ -290,22 +290,31 @@ impl eframe::App for VideoApp {
             };
         });
 
-        let mut latest_data = None;
-        while let Ok(data) = self.packet_receiver.try_recv() {
-            if self.current_url != data.url {
-                continue;
+        let mut latest_frame = None;
+        while let Ok(frame) = self.packet_receiver.try_recv() {
+            if self.current_url == frame.url {
+                latest_frame = Some(frame);
             }
-            latest_data = Some(data);
         }
 
-        if let Some(data) = latest_data.as_ref() {
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+        if let Some(frame) = latest_frame.as_ref() {
+            // On utilise from_rgb car on a envoyé du RGB24 (gain de 25% de RAM/CPU)
+            let color_image = egui::ColorImage::from_rgb(
                 [WIDTH as usize, HEIGHT as usize],
-                &data.data,
+                &frame.data,
             );
-            self.texture =
-                Some(ctx.load_texture("video_frame", color_image, egui::TextureOptions::LINEAR));
+            
+            // On met à jour la texture existante au lieu d'en créer une nouvelle
+            if let Some(texture) = &mut self.texture {
+                texture.set(color_image, egui::TextureOptions::LINEAR);
+            } else {
+                self.texture = Some(ctx.load_texture("video_stream", color_image, egui::TextureOptions::LINEAR));
+            }
         }
+
+        let latest_data = latest_frame.as_ref();
+
+            
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::BLACK))
@@ -625,7 +634,7 @@ fn run_decoder_managed(
                                     frame.format(),
                                     frame.width(),
                                     frame.height(),
-                                    ffmpeg::format::Pixel::RGBA,
+                                    ffmpeg::format::Pixel::RGB24,
                                     WIDTH,
                                     HEIGHT,
                                     ffmpeg::software::scaling::flag::Flags::POINT,
