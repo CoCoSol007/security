@@ -20,6 +20,7 @@ struct VideoApp {
     gallery_images: Vec<std::path::PathBuf>,
     gallery_index: usize,
     gallery_texture: Option<egui::TextureHandle>,
+    last_activity: std::time::Instant,
 }
 
 struct VideoStream {
@@ -232,6 +233,7 @@ fn main() -> Result<(), eframe::Error> {
         gallery_images: Vec::new(),
         gallery_index: 0,
         gallery_texture: None,
+        last_activity: std::time::Instant::now(),
     };
 
     for path in video_app.config.get_camera_urls().iter() {
@@ -290,6 +292,26 @@ impl eframe::App for VideoApp {
                 egui::CursorIcon::None
             };
         });
+
+        let has_activity = ctx.input(|i| {
+            !i.events.is_empty() || i.pointer.any_click() || i.pointer.delta().length() > 0.0
+        });
+
+        if has_activity {
+            if self.last_activity.elapsed().as_secs() >= 15 {
+                 if let Some(sender) = self.running_sender.get(&self.current_url) {
+                    let _ = sender.send(true);
+                }
+            }
+            self.last_activity = std::time::Instant::now();
+        }
+
+        if self.last_activity.elapsed().as_secs() >= 15 {
+            for sender in self.running_sender.values() {
+                let _ = sender.send(false);
+                self.texture = None;
+            }
+        }
 
         let mut latest_data = None;
         while let Ok(data) = self.packet_receiver.try_recv() {
