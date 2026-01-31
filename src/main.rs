@@ -1,4 +1,5 @@
 use crossbeam_channel::{Receiver, unbounded};
+use eframe::egui::RichText;
 use eframe::egui::{self, ahash::HashMap};
 use ffmpeg_next::Dictionary;
 use ffmpeg_next::{self as ffmpeg};
@@ -111,13 +112,18 @@ impl VideoApp {
         let data = frame.data.clone();
         let capture_path = self.config.config.capture_path.clone();
         let current_url = self.current_url.clone();
-        
-        let num = self.config.get_camera_urls().iter().position(|p| p == &current_url).unwrap_or(0);
+
+        let num = self
+            .config
+            .get_camera_urls()
+            .iter()
+            .position(|p| p == &current_url)
+            .unwrap_or(0);
         let raw_cam_name = self.config.get_camera_names()[num].clone();
 
         thread::spawn(move || {
             let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-            
+
             let cam_name = raw_cam_name
                 .replace("://", "_")
                 .replace("/", "_")
@@ -125,7 +131,9 @@ impl VideoApp {
 
             let filename = format!("{}/{}_{}.png", capture_path, timestamp, cam_name);
 
-            if let Some(img_buffer) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, data) {
+            if let Some(img_buffer) =
+                image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, data)
+            {
                 if let Err(e) = img_buffer.save(&filename) {
                     eprintln!("Erreur lors de la sauvegarde de l'image : {}", e);
                 }
@@ -323,7 +331,7 @@ impl eframe::App for VideoApp {
                         });
                     } else {
                         ui.centered_and_justified(|ui| {
-                            ui.label("Aucune image trouvée dans le dossier de capture");
+                            ui.label(RichText::new("Aucune image dans le dossier...").size(32.));
                         });
                     }
                 } else {
@@ -579,24 +587,28 @@ fn run_decoder_managed(
                 match ffmpeg::codec::context::Context::from_parameters(params.clone())?
                     .decoder()
                     .open_as(hw_codec)
-                    .and_then(|c| c.video()) 
+                    .and_then(|c| c.video())
                 {
                     Ok(hw_dec) => {
                         println!("Matériel : h264_v4l2m2m");
                         hw_dec
-                    },
+                    }
                     Err(_) => {
                         println!("Échec matériel (Device non trouvé), repli logiciel...");
-                        ffmpeg::codec::context::Context::from_parameters(params)?.decoder().video()?
+                        ffmpeg::codec::context::Context::from_parameters(params)?
+                            .decoder()
+                            .video()?
                     }
                 }
-            },
+            }
             None => {
                 println!("Codec {} non trouvé, usage logiciel.", codec_name);
-                ffmpeg::codec::context::Context::from_parameters(params)?.decoder().video()?
+                ffmpeg::codec::context::Context::from_parameters(params)?
+                    .decoder()
+                    .video()?
             }
         };
-                
+
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
             decoder.format(),
             decoder.width(),
