@@ -578,35 +578,46 @@ fn run_decoder_managed(
 
         let input = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
         let video_index = input.index();
-
-        let codec_name = "h264_v4l2m2m";
         let params = input.parameters();
+        let codec_id = params.id();
 
-        let mut decoder = match ffmpeg::decoder::find_by_name(codec_name) {
-            Some(hw_codec) => {
+        let hw_codec_name = match codec_id {
+            ffmpeg::codec::Id::H264 => Some("h264_v4l2m2m"),
+            ffmpeg::codec::Id::HEVC => Some("hevc_v4l2m2m"),
+            ffmpeg::codec::Id::VP8 => Some("vp8_v4l2m2m"),
+            ffmpeg::codec::Id::VP9 => Some("vp9_v4l2m2m"),
+            _ => None,
+        };
+
+        let mut decoder = if let Some(name) = hw_codec_name {
+            if let Some(hw_codec) = ffmpeg::decoder::find_by_name(name) {
                 match ffmpeg::codec::context::Context::from_parameters(params.clone())?
                     .decoder()
                     .open_as(hw_codec)
                     .and_then(|c| c.video())
                 {
                     Ok(hw_dec) => {
-                        println!("Matériel : h264_v4l2m2m");
+                        println!("Accélération matérielle activée : {}", name);
                         hw_dec
                     }
                     Err(_) => {
-                        println!("Échec matériel (Device non trouvé), repli logiciel...");
+                        println!("Échec matériel pour {}, repli logiciel...", name);
                         ffmpeg::codec::context::Context::from_parameters(params)?
                             .decoder()
                             .video()?
                     }
                 }
-            }
-            None => {
-                println!("Codec {} non trouvé, usage logiciel.", codec_name);
+            } else {
+                println!("Codec HW {} non compilé dans FFmpeg, usage logiciel.", name);
                 ffmpeg::codec::context::Context::from_parameters(params)?
                     .decoder()
                     .video()?
             }
+        } else {
+            println!("Pas de support matériel pour ce format, usage logiciel.");
+            ffmpeg::codec::context::Context::from_parameters(params)?
+                .decoder()
+                .video()?
         };
 
         let mut scaler = ffmpeg::software::scaling::context::Context::get(
