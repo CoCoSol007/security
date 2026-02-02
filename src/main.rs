@@ -4,7 +4,9 @@ use eframe::egui::{self, ahash::HashMap};
 use ffmpeg_next::Dictionary;
 use ffmpeg_next::{self as ffmpeg};
 use serde::Deserialize;
+use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
@@ -31,7 +33,7 @@ struct VideoStream {
 }
 
 struct VideoFrame {
-    data: Vec<u8>,
+    data: Arc<Vec<u8>>,
     url: String,
 }
 
@@ -110,36 +112,26 @@ impl VideoApp {
     }
 
     fn take_snapshot(&self, frame: &VideoFrame) {
-        let data = frame.data.clone();
-        let capture_path = self.config.config.capture_path.clone();
-        let current_url = self.current_url.clone();
-
-        let num = self
+        let data_arc = Arc::clone(&frame.data);
+        let path = self.config.config.capture_path.clone();
+        let cam_name = self
             .config
-            .get_camera_urls()
+            .camera
             .iter()
-            .position(|p| p == &current_url)
-            .unwrap_or(0);
-        let raw_cam_name = self.config.get_camera_names()[num].clone();
+            .find(|c| c.url == frame.url)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "unknown".into());
 
         thread::spawn(move || {
             let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+            let filename = format!("{}/{}_{}.png", path, timestamp, cam_name.replace(" ", "_"));
 
-            let cam_name = raw_cam_name
-                .replace("://", "_")
-                .replace("/", "_")
-                .replace(".", "_");
-
-            let filename = format!("{}/{}_{}.png", capture_path, timestamp, cam_name);
-
-            if let Some(img_buffer) =
-                image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(1280, 720, data)
-            {
-                if let Err(e) = img_buffer.save(&filename) {
-                    eprintln!("Erreur lors de la sauvegarde de l'image : {}", e);
-                }
-            } else {
-                eprintln!("Échec de la création du buffer d'image");
+            if let Some(buf) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+                WIDTH,
+                HEIGHT,
+                (&*data_arc).clone(),
+            ) {
+                let _ = buf.save(filename);
             }
         });
     }
@@ -217,58 +209,46 @@ impl VideoApp {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    let content = std::fs::read_to_string("config.toml").expect("Impossible de lire le fichier");
-    let parsed: RootConfig = toml::from_str(&content).expect("Impossible de parser le fichier");
+    ffmpeg::init().expect("FFmpeg init failed");
 
-    let (packet_sender, packet_receiver) = unbounded::<VideoFrame>();
+    let content = std::fs::read_to_string("config.toml").unwrap();
+    let config: RootConfig = toml::from_str(&content).unwrap();
 
-    let mut video_app = VideoApp {
-        current_url: parsed.get_first_camera_url().unwrap_or_default(),
-        running_sender: HashMap::default(),
-        packet_receiver: packet_receiver.clone(),
+    let (packet_sender, packet_receiver) = unbounded();
+    let mut running_sender = HashMap::default();
+
+    for cam in &config.camera {
+        let (stop_tx, stop_rx) = unbounded();
+        let url = cam.url.clone();
+        let p_sender = packet_sender.clone();
+        let wait_key = config.config.has_to_wait_for_keyframe;
+        let use_tcp = config.config.use_tcp_for_rtsp;
+        let is_active = url == config.camera[0].url;
+
+        thread::spawn(move || {
+            let _ = run_decoder_loop(url, p_sender, stop_rx, wait_key, use_tcp, is_active);
+        });
+        running_sender.insert(cam.url.clone(), stop_tx);
+    }
+
+    let app = VideoApp {
+        current_url: config.camera[0].url.clone(),
+        config,
+        running_sender,
+        packet_receiver,
         texture: None,
         notification_timer: None,
-        config: parsed,
         show_gallery: false,
         gallery_images: Vec::new(),
         gallery_index: 0,
         gallery_texture: None,
-        last_activity: std::time::Instant::now(),
-    };
-
-    for path in video_app.config.get_camera_urls().iter() {
-        let sender_clone = packet_sender.clone();
-        let path_string = path.to_string();
-        let (stop_sender, stop_receiver) = unbounded::<bool>();
-        let running = path_string == video_app.current_url;
-
-        thread::spawn(move || {
-            let video_stream = VideoStream {
-                url: path_string.clone(),
-                packet_sender: sender_clone.clone(),
-                stop_receiver,
-                running,
-            };
-            let _ = run_decoder_managed(
-                video_stream,
-                video_app.config.config.has_to_wait_for_keyframe,
-                video_app.config.config.use_tcp_for_rtsp,
-            );
-        });
-
-        video_app
-            .running_sender
-            .insert(path.to_string(), stop_sender);
-    }
-
-    let options = eframe::NativeOptions {
-        ..Default::default()
+        last_activity: Instant::now(),
     };
 
     eframe::run_native(
-        "Security Camera Viewer",
-        options,
-        Box::new(|_cc| Ok(Box::new(video_app))),
+        "CCTV Optimizer",
+        eframe::NativeOptions::default(),
+        Box::new(|_| Ok(Box::new(app))),
     )
 }
 
@@ -299,7 +279,7 @@ impl eframe::App for VideoApp {
 
         if has_activity {
             if self.last_activity.elapsed().as_secs() >= 15 {
-                 if let Some(sender) = self.running_sender.get(&self.current_url) {
+                if let Some(sender) = self.running_sender.get(&self.current_url) {
                     let _ = sender.send(true);
                 }
             }
@@ -309,7 +289,7 @@ impl eframe::App for VideoApp {
         if self.last_activity.elapsed().as_secs() >= 15 {
             for sender in self.running_sender.values() {
                 let _ = sender.send(false);
-                self.texture = None;
+                //  self.texture = None;
             }
         }
 
@@ -321,13 +301,20 @@ impl eframe::App for VideoApp {
             latest_data = Some(data);
         }
 
-        if let Some(data) = latest_data.as_ref() {
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+        if let Some(frame) = latest_data.as_ref() {
+            let ci = egui::ColorImage::from_rgba_unmultiplied(
                 [WIDTH as usize, HEIGHT as usize],
-                &data.data,
+                &frame.data,
             );
-            self.texture =
-                Some(ctx.load_texture("video_frame", color_image, egui::TextureOptions::LINEAR));
+            if let Some(t) = &mut self.texture {
+                t.set(ci, egui::TextureOptions::LINEAR); // Pas de réallocation GPU
+            } else {
+                self.texture = Some(ctx.load_texture("video", ci, egui::TextureOptions::LINEAR));
+            }
+
+            if self.notification_timer.is_some() {
+                self.take_snapshot(&frame);
+            }
         }
 
         egui::CentralPanel::default()
@@ -391,7 +378,6 @@ impl eframe::App for VideoApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 40.0;
-
                             {
                                 let (rect, resp) =
                                     ui.allocate_exact_size(btn_size, egui::Sense::click());
@@ -576,113 +562,76 @@ impl eframe::App for VideoApp {
     }
 }
 
-fn run_decoder_managed(
-    video_stream: VideoStream,
-    has_to_wait_for_keyframe: bool,
-    use_tcp_for_rtsp: bool,
+fn run_decoder_loop(
+    url: String,
+    sender: crossbeam_channel::Sender<VideoFrame>,
+    stop_rx: Receiver<bool>,
+    wait_key: bool,
+    use_tcp: bool,
+    mut active: bool,
 ) -> Result<(), ffmpeg::Error> {
-    let mut running = video_stream.running;
-    let mut waiting_for_keyframe = true;
-
     loop {
         let mut opts = Dictionary::new();
-        if use_tcp_for_rtsp {
+        if use_tcp {
             opts.set("rtsp_transport", "tcp");
         }
 
-        let mut ictx = match ffmpeg::format::input_with_dictionary(&video_stream.url, opts) {
-            Ok(ctx) => ctx,
-            Err(_) => {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                continue;
-            }
-        };
-
-        let input = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
-        let video_index = input.index();
-        let params = input.parameters();
-        let codec_id = params.id();
-
-        let hw_codec_name = match codec_id {
-            ffmpeg::codec::Id::H264 => Some("h264_v4l2m2m"),
-            ffmpeg::codec::Id::HEVC => Some("hevc_v4l2m2m"),
-            ffmpeg::codec::Id::VP8 => Some("vp8_v4l2m2m"),
-            ffmpeg::codec::Id::VP9 => Some("vp9_v4l2m2m"),
-            _ => None,
-        };
-
-        let mut decoder = if let Some(name) = hw_codec_name {
-            if let Some(hw_codec) = ffmpeg::decoder::find_by_name(name) {
-                match ffmpeg::codec::context::Context::from_parameters(params.clone())?
-                    .decoder()
-                    .open_as(hw_codec)
-                    .and_then(|c| c.video())
-                {
-                    Ok(hw_dec) => {
-                        println!("Accélération matérielle activée : {}", name);
-                        hw_dec
-                    }
-                    Err(_) => {
-                        println!("Échec matériel pour {}, repli logiciel...", name);
-                        ffmpeg::codec::context::Context::from_parameters(params)?
-                            .decoder()
-                            .video()?
-                    }
-                }
-            } else {
-                println!("Codec HW {} non compilé dans FFmpeg, usage logiciel.", name);
-                ffmpeg::codec::context::Context::from_parameters(params)?
-                    .decoder()
-                    .video()?
-            }
-        } else {
-            println!("Pas de support matériel pour ce format, usage logiciel.");
-            ffmpeg::codec::context::Context::from_parameters(params)?
+        if let Ok(mut ictx) = ffmpeg::format::input_with_dictionary(&url, opts) {
+            let input = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
+            let idx = input.index();
+            let mut decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?
                 .decoder()
-                .video()?
-        };
+                .video()?;
 
-        let mut scaler = ffmpeg::software::scaling::context::Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            ffmpeg::format::Pixel::RGBA,
-            WIDTH,
-            HEIGHT,
-            ffmpeg::software::scaling::flag::Flags::BILINEAR,
-        )?;
+            let mut scaler = ffmpeg::software::scaling::context::Context::get(
+                decoder.format(),
+                decoder.width(),
+                decoder.height(),
+                ffmpeg::format::Pixel::RGBA,
+                WIDTH,
+                HEIGHT,
+                ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR, // Plus rapide
+            )?;
 
-        let mut frame = ffmpeg::util::frame::video::Video::empty();
-        let mut frame_rgba = ffmpeg::util::frame::video::Video::empty();
+            let mut frame = ffmpeg::util::frame::video::Video::empty();
+            let mut frame_rgba = ffmpeg::util::frame::video::Video::empty();
+            let mut waiting = wait_key;
 
-        for (stream, packet) in ictx.packets() {
-            if let Ok(value) = video_stream.stop_receiver.try_recv() {
-                if value && !running {
-                    waiting_for_keyframe = true;
-                }
-                running = value;
-            }
-
-            if stream.index() == video_index && running {
-                if has_to_wait_for_keyframe && waiting_for_keyframe {
-                    if !packet.is_key() {
-                        continue;
-                    } else {
-                        waiting_for_keyframe = false;
+            for (stream, packet) in ictx.packets() {
+                // Vérifier les messages de contrôle (Actif/Passif)
+                if let Ok(state) = stop_rx.try_recv() {
+                    active = state;
+                    if active {
+                        waiting = wait_key;
                     }
                 }
 
-                if decoder.send_packet(&packet).is_ok() {
-                    while decoder.receive_frame(&mut frame).is_ok() {
-                        let _ = scaler.run(&frame, &mut frame_rgba);
+                if !active {
+                    thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
 
-                        let _ = video_stream.packet_sender.try_send(VideoFrame {
-                            data: frame_rgba.data(0).to_vec(),
-                            url: video_stream.url.clone(),
-                        });
+                if stream.index() == idx {
+                    if waiting && !packet.is_key() {
+                        continue;
+                    }
+                    waiting = false;
+
+                    if decoder.send_packet(&packet).is_ok() {
+                        while decoder.receive_frame(&mut frame).is_ok() {
+                            let _ = scaler.run(&frame, &mut frame_rgba);
+
+                            // On envoie un Arc pour éviter le .to_vec()
+                            let data = Arc::new(frame_rgba.data(0).to_vec());
+                            let _ = sender.try_send(VideoFrame {
+                                data,
+                                url: url.clone(),
+                            });
+                        }
                     }
                 }
             }
         }
+        thread::sleep(Duration::from_secs(5)); // Retry connexion
     }
 }
