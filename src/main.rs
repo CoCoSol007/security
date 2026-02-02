@@ -578,12 +578,13 @@ fn run_decoder_loop(
                 ffmpeg::format::Pixel::RGB24,
                 WIDTH,
                 HEIGHT,
-                ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR,
+                ffmpeg::software::scaling::flag::Flags::POINT,
             )?;
 
             let mut frame = ffmpeg::util::frame::video::Video::empty();
             let mut frame_rgb = ffmpeg::util::frame::video::Video::empty();
             let mut waiting = wait_key;
+            let mut packed = vec![0u8; WIDTH as usize * HEIGHT as usize * 3];
 
             for (stream, packet) in ictx.packets() {
                 if let Ok(state) = stop_rx.try_recv() {
@@ -616,9 +617,18 @@ fn run_decoder_loop(
 
                                 let width = frame_rgb.width() as usize;
                                 let height = frame_rgb.height() as usize;
-                                let stride = frame_rgb.stride(0) as usize;
+                                let _ = scaler.run(&frame, &mut frame_rgb);
                                 let src = frame_rgb.data(0);
-                                let mut packed = vec![0u8; width * height * 3];
+                                let stride = frame_rgb.stride(0);
+
+                                for y in 0..HEIGHT as usize {
+                                    let src_start = y * stride;
+                                    let dst_start = y * WIDTH as usize * 3;
+                                    packed[dst_start..dst_start + WIDTH as usize * 3]
+                                        .copy_from_slice(
+                                            &src[src_start..src_start + WIDTH as usize * 3],
+                                        );
+                                }
 
                                 for y in 0..height {
                                     let src_start = y * stride;
@@ -628,7 +638,7 @@ fn run_decoder_loop(
                                 }
 
                                 // On envoie un Arc pour éviter le .to_vec()
-                                let data = Arc::new(packed);
+                                let data = Arc::new(packed.clone());
                                 let _ = sender.try_send(VideoFrame {
                                     data,
                                     url: url.clone(),
