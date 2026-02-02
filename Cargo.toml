@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.100"
 chrono = "0.4.43"
 crossbeam-channel = "0.5.15"
 eframe = "0.33.3"
-ffmpeg-next = {version = "8.0.0", features = ["rpi"] }
+gstreamer = "0.24.4"
+gstreamer-app = "0.24.4"
+gstreamer-video = "0.24.4"
 image = "0.25.9"
-serde = {version = "1.0.228", features = ["derive"]}
+serde = { version = "1.0.228", features = ["derive"] }
 toml = "0.9.11"

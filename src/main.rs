@@ -1,8 +1,6 @@
 use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui::RichText;
 use eframe::egui::{self, ahash::HashMap};
-use ffmpeg_next::Dictionary;
-use ffmpeg_next::{self as ffmpeg};
 use serde::Deserialize;
 use std::thread;
 
@@ -27,7 +25,6 @@ struct VideoStream {
     url: String,
     packet_sender: crossbeam_channel::Sender<VideoFrame>,
     stop_receiver: Receiver<bool>,
-    running: bool,
 }
 
 struct VideoFrame {
@@ -236,24 +233,19 @@ fn main() -> Result<(), eframe::Error> {
         last_activity: std::time::Instant::now(),
     };
 
+    let _ = video_app.config.config.has_to_wait_for_keyframe;
+
     for path in video_app.config.get_camera_urls().iter() {
         let sender_clone = packet_sender.clone();
         let path_string = path.to_string();
         let (stop_sender, stop_receiver) = unbounded::<bool>();
-        let running = path_string == video_app.current_url;
-
         thread::spawn(move || {
             let video_stream = VideoStream {
                 url: path_string.clone(),
                 packet_sender: sender_clone.clone(),
                 stop_receiver,
-                running,
             };
-            let _ = run_decoder_managed(
-                video_stream,
-                video_app.config.config.has_to_wait_for_keyframe,
-                video_app.config.config.use_tcp_for_rtsp,
-            );
+            let _ = run_decoder_managed(video_stream, video_app.config.config.use_tcp_for_rtsp);
         });
 
         video_app
@@ -299,7 +291,7 @@ impl eframe::App for VideoApp {
 
         if has_activity {
             if self.last_activity.elapsed().as_secs() >= 15 {
-                 if let Some(sender) = self.running_sender.get(&self.current_url) {
+                if let Some(sender) = self.running_sender.get(&self.current_url) {
                     let _ = sender.send(true);
                 }
             }
@@ -576,113 +568,85 @@ impl eframe::App for VideoApp {
     }
 }
 
+use gst::prelude::*;
+use gstreamer as gst;
+use gstreamer_app as gst_app;
+
 fn run_decoder_managed(
     video_stream: VideoStream,
-    has_to_wait_for_keyframe: bool,
     use_tcp_for_rtsp: bool,
-) -> Result<(), ffmpeg::Error> {
-    let mut running = video_stream.running;
-    let mut waiting_for_keyframe = true;
+) -> Result<(), anyhow::Error> {
+    // 1. Initialisation de GStreamer
+    gst::init()?;
 
+    // 2. Construction de la chaîne de pipeline
+    // On utilise decodebin pour qu'il choisisse automatiquement le décodeur matériel (v4l2)
+    let protocols = if use_tcp_for_rtsp { "tcp" } else { "udp" };
+
+    let pipeline_str = format!(
+        "rtspsrc location={} protocols={} ! rtph265depay ! h265parse ! v4l2h265dec ! \
+         videoconvert ! videoscale ! \
+         video/x-raw,format=RGBA,width={},height={} ! appsink name=sink",
+        video_stream.url, protocols, WIDTH, HEIGHT
+    );
+
+    let pipeline = gst::parse::launch(&pipeline_str)?;
+    let pipeline = pipeline.dynamic_cast::<gst::Pipeline>().unwrap();
+
+    // 3. Récupération de l'appsink pour extraire les frames
+    let appsink = pipeline
+        .by_name("sink")
+        .unwrap()
+        .dynamic_cast::<gst_app::AppSink>()
+        .unwrap();
+
+    // Configuration de l'appsink pour récupérer les images en boucle
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                // Extraction des données binaires
+                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+
+                // Envoi vers ton canal de traitement
+                let _ = video_stream.packet_sender.try_send(VideoFrame {
+                    data: map.to_vec(),
+                    url: video_stream.url.clone(),
+                });
+
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    // 4. Gestion du démarrage / arrêt
+    pipeline.set_state(gst::State::Playing)?;
+
+    // Boucle de contrôle pour surveiller le stop_receiver
+    let bus = pipeline.bus().unwrap();
     loop {
-        let mut opts = Dictionary::new();
-        if use_tcp_for_rtsp {
-            opts.set("rtsp_transport", "tcp");
+        if let Ok(stop) = video_stream.stop_receiver.try_recv() {
+            if stop {
+                pipeline.set_state(gst::State::Playing)?;
+            } else {
+                pipeline.set_state(gst::State::Paused)?;
+            }
         }
 
-        let mut ictx = match ffmpeg::format::input_with_dictionary(&video_stream.url, opts) {
-            Ok(ctx) => ctx,
-            Err(_) => {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                continue;
-            }
-        };
-
-        let input = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
-        let video_index = input.index();
-        let params = input.parameters();
-        let codec_id = params.id();
-
-        let hw_codec_name = match codec_id {
-            ffmpeg::codec::Id::H264 => Some("h264_v4l2m2m"),
-            ffmpeg::codec::Id::HEVC => Some("hevc_v4l2m2m"),
-            ffmpeg::codec::Id::VP8 => Some("vp8_v4l2m2m"),
-            ffmpeg::codec::Id::VP9 => Some("vp9_v4l2m2m"),
-            _ => None,
-        };
-
-        let mut decoder = if let Some(name) = hw_codec_name {
-            if let Some(hw_codec) = ffmpeg::decoder::find_by_name(name) {
-                match ffmpeg::codec::context::Context::from_parameters(params.clone())?
-                    .decoder()
-                    .open_as(hw_codec)
-                    .and_then(|c| c.video())
-                {
-                    Ok(hw_dec) => {
-                        println!("Accélération matérielle activée : {}", name);
-                        hw_dec
-                    }
-                    Err(_) => {
-                        println!("Échec matériel pour {}, repli logiciel...", name);
-                        ffmpeg::codec::context::Context::from_parameters(params)?
-                            .decoder()
-                            .video()?
-                    }
+        // Vérification des messages d'erreur du pipeline
+        if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
+            match msg.view() {
+                gst::MessageView::Error(err) => {
+                    eprintln!("Erreur GStreamer: {}", err.error());
+                    break;
                 }
-            } else {
-                println!("Codec HW {} non compilé dans FFmpeg, usage logiciel.", name);
-                ffmpeg::codec::context::Context::from_parameters(params)?
-                    .decoder()
-                    .video()?
-            }
-        } else {
-            println!("Pas de support matériel pour ce format, usage logiciel.");
-            ffmpeg::codec::context::Context::from_parameters(params)?
-                .decoder()
-                .video()?
-        };
-
-        let mut scaler = ffmpeg::software::scaling::context::Context::get(
-            decoder.format(),
-            decoder.width(),
-            decoder.height(),
-            ffmpeg::format::Pixel::RGBA,
-            WIDTH,
-            HEIGHT,
-            ffmpeg::software::scaling::flag::Flags::BILINEAR,
-        )?;
-
-        let mut frame = ffmpeg::util::frame::video::Video::empty();
-        let mut frame_rgba = ffmpeg::util::frame::video::Video::empty();
-
-        for (stream, packet) in ictx.packets() {
-            if let Ok(value) = video_stream.stop_receiver.try_recv() {
-                if value && !running {
-                    waiting_for_keyframe = true;
-                }
-                running = value;
-            }
-
-            if stream.index() == video_index && running {
-                if has_to_wait_for_keyframe && waiting_for_keyframe {
-                    if !packet.is_key() {
-                        continue;
-                    } else {
-                        waiting_for_keyframe = false;
-                    }
-                }
-
-                if decoder.send_packet(&packet).is_ok() {
-                    while decoder.receive_frame(&mut frame).is_ok() {
-                        let _ = scaler.run(&frame, &mut frame_rgba);
-
-                        let _ = video_stream.packet_sender.try_send(VideoFrame {
-                            data: frame_rgba.data(0).to_vec(),
-                            url: video_stream.url.clone(),
-                        });
-                    }
-                }
+                gst::MessageView::Eos(_) => break,
+                _ => (),
             }
         }
     }
+
+    pipeline.set_state(gst::State::Null)?;
+    Ok(())
 }
