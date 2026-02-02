@@ -25,13 +25,6 @@ struct VideoApp {
     last_activity: std::time::Instant,
 }
 
-struct VideoStream {
-    url: String,
-    packet_sender: crossbeam_channel::Sender<VideoFrame>,
-    stop_receiver: Receiver<bool>,
-    running: bool,
-}
-
 struct VideoFrame {
     data: Arc<Vec<u8>>,
     url: String,
@@ -64,10 +57,6 @@ impl RootConfig {
 
     fn get_camera_names(&self) -> Vec<String> {
         self.camera.iter().map(|cam| cam.name.clone()).collect()
-    }
-
-    fn get_first_camera_url(&self) -> Option<String> {
-        self.camera.first().map(|cam| cam.url.clone())
     }
 }
 
@@ -598,7 +587,6 @@ fn run_decoder_loop(
             let mut waiting = wait_key;
 
             for (stream, packet) in ictx.packets() {
-                // Vérifier les messages de contrôle (Actif/Passif)
                 if let Ok(state) = stop_rx.try_recv() {
                     active = state;
                     if active {
@@ -606,32 +594,39 @@ fn run_decoder_loop(
                     }
                 }
 
-                if !active {
-                    thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-
                 if stream.index() == idx {
+                    if !active {
+                        // On vide le buffer réseau pour rester "en direct"
+                        continue;
+                    }
+
                     if waiting && !packet.is_key() {
                         continue;
                     }
                     waiting = false;
 
-                    if decoder.send_packet(&packet).is_ok() {
-                        while decoder.receive_frame(&mut frame).is_ok() {
-                            let _ = scaler.run(&frame, &mut frame_rgba);
+                    if stream.index() == idx {
+                        if waiting && !packet.is_key() {
+                            continue;
+                        }
+                        waiting = false;
 
-                            // On envoie un Arc pour éviter le .to_vec()
-                            let data = Arc::new(frame_rgba.data(0).to_vec());
-                            let _ = sender.try_send(VideoFrame {
-                                data,
-                                url: url.clone(),
-                            });
+                        if decoder.send_packet(&packet).is_ok() {
+                            while decoder.receive_frame(&mut frame).is_ok() {
+                                let _ = scaler.run(&frame, &mut frame_rgba);
+
+                                // On envoie un Arc pour éviter le .to_vec()
+                                let data = Arc::new(frame_rgba.data(0).to_vec());
+                                let _ = sender.try_send(VideoFrame {
+                                    data,
+                                    url: url.clone(),
+                                });
+                            }
                         }
                     }
                 }
             }
+            thread::sleep(Duration::from_secs(5)); // Retry connexion
         }
-        thread::sleep(Duration::from_secs(5)); // Retry connexion
     }
 }
