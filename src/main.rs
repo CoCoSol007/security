@@ -295,24 +295,13 @@ impl eframe::App for VideoApp {
         }
 
         if let Some(frame) = latest_data.as_ref() {
-            let mut rgba = Vec::with_capacity(frame.data.len() / 3 * 4);
-            for rgb in frame.data.chunks_exact(3) {
-                rgba.push(rgb[0]);
-                rgba.push(rgb[1]);
-                rgba.push(rgb[2]);
-                rgba.push(255);
-            }
+            let size = [WIDTH as usize, HEIGHT as usize];
+            let ci = egui::ColorImage::from_rgb(size, &frame.data);
 
-            let ci =
-                egui::ColorImage::from_rgba_unmultiplied([WIDTH as usize, HEIGHT as usize], &rgba);
             if let Some(t) = &mut self.texture {
-                t.set(ci, egui::TextureOptions::LINEAR); // Pas de réallocation GPU
+                t.set(ci, egui::TextureOptions::LINEAR);
             } else {
                 self.texture = Some(ctx.load_texture("video", ci, egui::TextureOptions::LINEAR));
-            }
-
-            if self.notification_timer.is_some() {
-                self.take_snapshot(&frame);
             }
         }
 
