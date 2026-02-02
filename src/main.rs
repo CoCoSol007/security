@@ -116,7 +116,7 @@ impl VideoApp {
             let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
             let filename = format!("{}/{}_{}.png", path, timestamp, cam_name.replace(" ", "_"));
 
-            if let Some(buf) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+            if let Some(buf) = image::ImageBuffer::<image::Rgb<u8>, _>::from_raw(
                 WIDTH,
                 HEIGHT,
                 (&*data_arc).clone(),
@@ -295,10 +295,16 @@ impl eframe::App for VideoApp {
         }
 
         if let Some(frame) = latest_data.as_ref() {
-            let ci = egui::ColorImage::from_rgba_unmultiplied(
-                [WIDTH as usize, HEIGHT as usize],
-                &frame.data,
-            );
+            let mut rgba = Vec::with_capacity(frame.data.len() / 3 * 4);
+            for rgb in frame.data.chunks_exact(3) {
+                rgba.push(rgb[0]);
+                rgba.push(rgb[1]);
+                rgba.push(rgb[2]);
+                rgba.push(255);
+            }
+
+            let ci =
+                egui::ColorImage::from_rgba_unmultiplied([WIDTH as usize, HEIGHT as usize], &rgba);
             if let Some(t) = &mut self.texture {
                 t.set(ci, egui::TextureOptions::LINEAR); // Pas de réallocation GPU
             } else {
@@ -580,14 +586,14 @@ fn run_decoder_loop(
                 decoder.format(),
                 decoder.width(),
                 decoder.height(),
-                ffmpeg::format::Pixel::RGBA,
+                ffmpeg::format::Pixel::RGB24,
                 WIDTH,
                 HEIGHT,
                 ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR,
             )?;
 
             let mut frame = ffmpeg::util::frame::video::Video::empty();
-            let mut frame_rgba = ffmpeg::util::frame::video::Video::empty();
+            let mut frame_rgb = ffmpeg::util::frame::video::Video::empty();
             let mut waiting = wait_key;
 
             for (stream, packet) in ictx.packets() {
@@ -617,10 +623,23 @@ fn run_decoder_loop(
 
                         if decoder.send_packet(&packet).is_ok() {
                             while decoder.receive_frame(&mut frame).is_ok() {
-                                let _ = scaler.run(&frame, &mut frame_rgba);
+                                let _ = scaler.run(&frame, &mut frame_rgb);
+
+                                let width = frame_rgb.width() as usize;
+                                let height = frame_rgb.height() as usize;
+                                let stride = frame_rgb.stride(0) as usize;
+                                let src = frame_rgb.data(0);
+                                let mut packed = vec![0u8; width * height * 3];
+
+                                for y in 0..height {
+                                    let src_start = y * stride;
+                                    let dst_start = y * width * 3;
+                                    packed[dst_start..dst_start + width * 3]
+                                        .copy_from_slice(&src[src_start..src_start + width * 3]);
+                                }
 
                                 // On envoie un Arc pour éviter le .to_vec()
-                                let data = Arc::new(frame_rgba.data(0).to_vec());
+                                let data = Arc::new(packed);
                                 let _ = sender.try_send(VideoFrame {
                                     data,
                                     url: url.clone(),
