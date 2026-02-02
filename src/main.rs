@@ -581,11 +581,11 @@ fn run_decoder_managed(
     let protocols = if use_tcp_for_rtsp { "tcp" } else { "udp" };
 
     let pipeline_str = format!(
-        "rtspsrc location='{}' protocols={} ! \
-         rtph265depay ! h265parse ! avdec_h265 ! \
-         videoconvert ! videoscale ! \
-         video/x-raw,format=RGBA,width={},height={} ! \
-         appsink name=sink drop=true max-buffers=1",
+        "rtspsrc location=\"{}\" protocols={} latency=0 ! \
+     rtph265depay ! h265parse ! avdec_h265 ! \
+     videoconvert ! videoscale ! \
+     video/x-raw,format=RGBA,width={},height={} ! \
+     appsink name=sink drop=true max-buffers=1",
         video_stream.url, protocols, WIDTH, HEIGHT
     );
 
@@ -594,7 +594,7 @@ fn run_decoder_managed(
 
     let appsink = pipeline
         .by_name("sink")
-        .expect("Sink non trouvé dans le pipeline")
+        .expect("Sink non trouvé")
         .dynamic_cast::<gst_app::AppSink>()
         .expect("L'élément n'est pas un AppSink");
 
@@ -605,14 +605,12 @@ fn run_decoder_managed(
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
 
                 let _ = sender_clone.try_send(VideoFrame {
                     data: map.to_vec(),
                     url: url_clone.clone(),
                 });
-
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),
@@ -624,6 +622,10 @@ fn run_decoder_managed(
     loop {
         if let Ok(stop) = video_stream.stop_receiver.try_recv() {
             if stop {
+                pipeline.seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::ClockTime::ZERO,
+                )?;
                 pipeline.set_state(gst::State::Playing)?;
             } else {
                 pipeline.set_state(gst::State::Paused)?;
@@ -633,7 +635,7 @@ fn run_decoder_managed(
         if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
             match msg.view() {
                 gst::MessageView::Error(err) => {
-                    eprintln!("Erreur GStreamer: {}", err.error());
+                    eprintln!("Erreur GStreamer ({}): {}", video_stream.url, err.error());
                     break;
                 }
                 gst::MessageView::Eos(_) => break,
@@ -642,6 +644,6 @@ fn run_decoder_managed(
         }
     }
 
-    pipeline.set_state(gst::State::Null)?;
+    let _ = pipeline.set_state(gst::State::Null);
     Ok(())
 }
