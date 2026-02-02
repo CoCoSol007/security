@@ -23,6 +23,7 @@ struct VideoApp {
     gallery_index: usize,
     gallery_texture: Option<egui::TextureHandle>,
     last_activity: std::time::Instant,
+    is_down: bool,
 }
 
 struct VideoFrame {
@@ -232,6 +233,7 @@ fn main() -> Result<(), eframe::Error> {
         gallery_index: 0,
         gallery_texture: None,
         last_activity: Instant::now(),
+        is_down: false,
     };
 
     eframe::run_native(
@@ -267,17 +269,19 @@ impl eframe::App for VideoApp {
         });
 
         if has_activity {
-            if self.last_activity.elapsed().as_secs() >= 15 {
+            if self.last_activity.elapsed().as_secs() >= 150 {
                 if let Some(sender) = self.running_sender.get(&self.current_url) {
                     let _ = sender.send(true);
+                    self.is_down = false;
                 }
             }
             self.last_activity = std::time::Instant::now();
         }
 
-        if self.last_activity.elapsed().as_secs() >= 15 {
+        if self.last_activity.elapsed().as_secs() >= 150 && !self.is_down {
             for sender in self.running_sender.values() {
                 let _ = sender.send(false);
+                self.is_down = true;
                 //  self.texture = None;
             }
         }
@@ -579,7 +583,7 @@ fn run_decoder_loop(
                 ffmpeg::format::Pixel::RGBA,
                 WIDTH,
                 HEIGHT,
-                ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR, // Plus rapide
+                ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR,
             )?;
 
             let mut frame = ffmpeg::util::frame::video::Video::empty();
