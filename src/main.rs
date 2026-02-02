@@ -567,9 +567,13 @@ fn run_decoder_loop(
         if let Ok(mut ictx) = ffmpeg::format::input_with_dictionary(&url, opts) {
             let input = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
             let idx = input.index();
-            let mut decoder = ffmpeg::codec::context::Context::from_parameters(input.parameters())?
-                .decoder()
-                .video()?;
+            let mut decoder_ctx =
+                ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
+            decoder_ctx.set_threading(ffmpeg::codec::threading::Config {
+                kind: ffmpeg::codec::threading::Type::Frame,
+                count: 0,
+            });
+            let mut decoder = decoder_ctx.decoder().video()?;
 
             let mut scaler = ffmpeg::software::scaling::context::Context::get(
                 decoder.format(),
