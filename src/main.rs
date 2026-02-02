@@ -576,43 +576,41 @@ fn run_decoder_managed(
     video_stream: VideoStream,
     use_tcp_for_rtsp: bool,
 ) -> Result<(), anyhow::Error> {
-    // 1. Initialisation de GStreamer
     gst::init()?;
 
-    // 2. Construction de la chaîne de pipeline
-    // On utilise decodebin pour qu'il choisisse automatiquement le décodeur matériel (v4l2)
     let protocols = if use_tcp_for_rtsp { "tcp" } else { "udp" };
 
     let pipeline_str = format!(
-        "rtspsrc location={} protocols={} ! rtph265depay ! h265parse ! v4l2h265dec ! \
+        "rtspsrc location='{}' protocols={} ! \
+         rtph265depay ! h265parse ! avdec_h265 ! \
          videoconvert ! videoscale ! \
-         video/x-raw,format=RGBA,width={},height={} ! appsink name=sink",
+         video/x-raw,format=RGBA,width={},height={} ! \
+         appsink name=sink drop=true max-buffers=1",
         video_stream.url, protocols, WIDTH, HEIGHT
     );
 
     let pipeline = gst::parse::launch(&pipeline_str)?;
     let pipeline = pipeline.dynamic_cast::<gst::Pipeline>().unwrap();
 
-    // 3. Récupération de l'appsink pour extraire les frames
     let appsink = pipeline
         .by_name("sink")
-        .unwrap()
+        .expect("Sink non trouvé dans le pipeline")
         .dynamic_cast::<gst_app::AppSink>()
-        .unwrap();
+        .expect("L'élément n'est pas un AppSink");
 
-    // Configuration de l'appsink pour récupérer les images en boucle
+    let url_clone = video_stream.url.clone();
+    let sender_clone = video_stream.packet_sender.clone();
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |sink| {
                 let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                // Extraction des données binaires
+
                 let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
 
-                // Envoi vers ton canal de traitement
-                let _ = video_stream.packet_sender.try_send(VideoFrame {
+                let _ = sender_clone.try_send(VideoFrame {
                     data: map.to_vec(),
-                    url: video_stream.url.clone(),
+                    url: url_clone.clone(),
                 });
 
                 Ok(gst::FlowSuccess::Ok)
@@ -620,10 +618,8 @@ fn run_decoder_managed(
             .build(),
     );
 
-    // 4. Gestion du démarrage / arrêt
     pipeline.set_state(gst::State::Playing)?;
 
-    // Boucle de contrôle pour surveiller le stop_receiver
     let bus = pipeline.bus().unwrap();
     loop {
         if let Ok(stop) = video_stream.stop_receiver.try_recv() {
@@ -634,7 +630,6 @@ fn run_decoder_managed(
             }
         }
 
-        // Vérification des messages d'erreur du pipeline
         if let Some(msg) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) {
             match msg.view() {
                 gst::MessageView::Error(err) => {
