@@ -706,6 +706,7 @@ struct ReolinkValue {
 #[derive(Debug, Deserialize)]
 struct AiEvents {
     people: Option<AlarmStatus>,
+    vehicle: Option<AlarmStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -778,10 +779,18 @@ impl DoorbellMonitor {
                                     .map(|p| p.alarm_state)
                                     .unwrap_or(0);
 
-                                if bouton == 1 {
+                                let vehicle = event
+                                    .value
+                                    .ai
+                                    .as_ref()
+                                    .and_then(|a| a.vehicle.as_ref())
+                                    .map(|p| p.alarm_state)
+                                    .unwrap_or(0);
+
+                                if bouton == 1 || humain == 1 || vehicle == 1 {
                                     println!("Sonnette pressée ou détection humaine !");
                                     let _ = self.wakeup_tx.send(());
-                                    Command::new("swaymsg").arg("output * dpms on").spawn().ok();
+                                    Command::new("wtype").arg("hello").spawn().ok();
                                 }
                             }
                         }
