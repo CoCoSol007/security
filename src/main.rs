@@ -1,10 +1,10 @@
 use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui::RichText;
 use eframe::egui::{self, ahash::HashMap};
-use enigo::{Direction, Enigo, Keyboard, Mouse, Settings};
 use ffmpeg_next::Dictionary;
 use ffmpeg_next::{self as ffmpeg};
 use serde::Deserialize;
+use std::process::Command;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,6 +27,7 @@ struct VideoApp {
     gallery_texture: Option<egui::TextureHandle>,
     last_activity: std::time::Instant,
     is_down: bool,
+    wakeup_rx: Receiver<()>,
 }
 
 struct VideoFrame {
@@ -216,7 +217,9 @@ async fn main() {
     let content = std::fs::read_to_string("config.toml").unwrap();
     let config: RootConfig = toml::from_str(&content).unwrap();
 
-    let mut monitor = DoorbellMonitor::new(&config.bell.bell_ip, &config.bell.mdp);
+    let (wakeup_tx, wakeup_rx) = unbounded();
+
+    let mut monitor = DoorbellMonitor::new(&config.bell.bell_ip, &config.bell.mdp, wakeup_tx);
     tokio::spawn(async move {
         println!("Démarrage du moniteur de sonnette...");
         monitor.run().await;
@@ -252,6 +255,7 @@ async fn main() {
         gallery_texture: None,
         last_activity: Instant::now(),
         is_down: false,
+        wakeup_rx,
     };
 
     let _ = eframe::run_native(
@@ -286,7 +290,12 @@ impl eframe::App for VideoApp {
             !i.events.is_empty() || i.pointer.any_click() || i.pointer.delta().length() > 0.0
         });
 
-        if has_activity {
+        let wakeup_received = match self.wakeup_rx.try_recv() {
+            Ok(_) => true,
+            Err(_) => false,
+        };
+
+        if has_activity || wakeup_received {
             if self.last_activity.elapsed().as_secs() >= SLEEP_TIME {
                 if let Some(sender) = self.running_sender.get(&self.current_url) {
                     let _ = sender.send(true);
@@ -702,16 +711,15 @@ struct AlarmStatus {
 struct DoorbellMonitor {
     ip: String,
     mdp: String,
-    enigo: Enigo,
+    wakeup_tx: crossbeam_channel::Sender<()>,
 }
 
 impl DoorbellMonitor {
-    fn new(ip: &str, mdp: &str) -> Self {
-        let enigo = Enigo::new(&Settings::default()).expect("Erreur Enigo");
+    fn new(ip: &str, mdp: &str, wakeup_tx: crossbeam_channel::Sender<()>) -> Self {
         Self {
             ip: ip.to_string(),
             mdp: mdp.to_string(),
-            enigo,
+            wakeup_tx,
         }
     }
 
@@ -750,12 +758,8 @@ impl DoorbellMonitor {
                     match res {
                         Ok(data_list) => {
                             if let Some(event) = data_list.first() {
-                                let bouton = event
-                                    .value
-                                    .visitor
-                                    .as_ref()
-                                    .map(|s| s.alarm_state)
-                                    .unwrap_or(0);
+                                let bouton =
+                                    event.value.md.as_ref().map(|s| s.alarm_state).unwrap_or(0);
                                 let humain = event
                                     .value
                                     .ai
@@ -765,14 +769,9 @@ impl DoorbellMonitor {
                                     .unwrap_or(0);
 
                                 if bouton == 1 {
-                                    println!("🔔 SONNETTE ! (Humain: {})", humain);
-                                    let _ =
-                                        self.enigo.button(enigo::Button::Left, Direction::Click);
-                                    let _ = std::process::Command::new("brightnessctl")
-                                        .arg("set")
-                                        .arg("100%")
-                                        .spawn();
-                                    sleep(Duration::from_secs(6)).await;
+                                    println!("Sonnette pressée ou détection humaine !");
+                                    let _ = self.wakeup_tx.send(());
+                                    Command::new("swaymsg").arg("output * dpms on").spawn().ok();
                                 }
                             }
                         }
