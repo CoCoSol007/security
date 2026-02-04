@@ -764,8 +764,12 @@ impl DoorbellMonitor {
                     match res {
                         Ok(data_list) => {
                             if let Some(event) = data_list.first() {
-                                let bouton =
-                                    event.value.md.as_ref().map(|s| s.alarm_state).unwrap_or(0);
+                                let bouton = event
+                                    .value
+                                    .visitor
+                                    .as_ref()
+                                    .map(|s| s.alarm_state)
+                                    .unwrap_or(0);
                                 let humain = event
                                     .value
                                     .ai
