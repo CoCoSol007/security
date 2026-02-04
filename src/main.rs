@@ -1,15 +1,18 @@
 use crossbeam_channel::{Receiver, unbounded};
 use eframe::egui::RichText;
 use eframe::egui::{self, ahash::HashMap};
+use enigo::{Direction, Enigo, Keyboard, Mouse, Settings};
 use ffmpeg_next::Dictionary;
 use ffmpeg_next::{self as ffmpeg};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::time::sleep;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
+const SLEEP_TIME: u64 = 5; // secondes
 
 struct VideoApp {
     config: RootConfig,
@@ -46,8 +49,15 @@ struct Camera {
 }
 
 #[derive(Deserialize, Debug)]
+struct DoorbellConfig {
+    bell_ip: String,
+    mdp: String,
+}
+
+#[derive(Deserialize, Debug)]
 struct RootConfig {
     config: Config,
+    bell: DoorbellConfig,
     camera: Vec<Camera>,
 }
 
@@ -198,11 +208,19 @@ impl VideoApp {
     }
 }
 
-fn main() -> Result<(), eframe::Error> {
+#[tokio::main]
+async fn main() {
+    env_logger::init();
     ffmpeg::init().expect("FFmpeg init failed");
 
     let content = std::fs::read_to_string("config.toml").unwrap();
     let config: RootConfig = toml::from_str(&content).unwrap();
+
+    let mut monitor = DoorbellMonitor::new(&config.bell.bell_ip, &config.bell.mdp);
+    tokio::spawn(async move {
+        println!("Démarrage du moniteur de sonnette...");
+        monitor.run().await;
+    });
 
     let (packet_sender, packet_receiver) = unbounded();
     let mut running_sender = HashMap::default();
@@ -236,11 +254,11 @@ fn main() -> Result<(), eframe::Error> {
         is_down: false,
     };
 
-    eframe::run_native(
+    let _ = eframe::run_native(
         "CCTV Optimizer",
         eframe::NativeOptions::default(),
         Box::new(|_| Ok(Box::new(app))),
-    )
+    );
 }
 
 impl eframe::App for VideoApp {
@@ -269,7 +287,7 @@ impl eframe::App for VideoApp {
         });
 
         if has_activity {
-            if self.last_activity.elapsed().as_secs() >= 150 {
+            if self.last_activity.elapsed().as_secs() >= SLEEP_TIME {
                 if let Some(sender) = self.running_sender.get(&self.current_url) {
                     let _ = sender.send(true);
                     self.is_down = false;
@@ -278,7 +296,7 @@ impl eframe::App for VideoApp {
             self.last_activity = std::time::Instant::now();
         }
 
-        if self.last_activity.elapsed().as_secs() >= 150 && !self.is_down {
+        if self.last_activity.elapsed().as_secs() >= SLEEP_TIME && !self.is_down {
             for sender in self.running_sender.values() {
                 let _ = sender.send(false);
                 self.is_down = true;
@@ -653,6 +671,117 @@ fn run_decoder_loop(
                 }
             }
             thread::sleep(Duration::from_secs(5)); // Retry connexion
+        }
+    }
+}
+
+// --- LE MAPPAGE SERDE COMPLET ---
+#[derive(Debug, Deserialize)]
+struct ReolinkResponse {
+    value: ReolinkValue,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReolinkValue {
+    ai: Option<AiEvents>,
+    md: Option<AlarmStatus>,
+    visitor: Option<AlarmStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AiEvents {
+    people: Option<AlarmStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlarmStatus {
+    #[serde(default)]
+    alarm_state: i32,
+}
+
+struct DoorbellMonitor {
+    ip: String,
+    mdp: String,
+    enigo: Enigo,
+}
+
+impl DoorbellMonitor {
+    fn new(ip: &str, mdp: &str) -> Self {
+        let enigo = Enigo::new(&Settings::default()).expect("Erreur Enigo");
+        Self {
+            ip: ip.to_string(),
+            mdp: mdp.to_string(),
+            enigo,
+        }
+    }
+
+    async fn run(&mut self) {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+
+        loop {
+            println!("--- Surveillance active sur {} ---", self.ip);
+            if let Err(e) = self.listen_loop(&client).await {
+                println!("Erreur de connexion : {}. Reconnexion dans 5s...", e);
+            }
+            sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    async fn listen_loop(
+        &mut self,
+        client: &reqwest::Client,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!(
+            "http://{}/cgi-bin/api.cgi?cmd=GetEvents&user=admin&password={}",
+            self.ip, self.mdp
+        );
+
+        loop {
+            match client.get(&url).send().await {
+                Ok(res) => {
+                    // On parse avec sécurité
+                    let a = res.text().await?;
+                    let res: Result<Vec<ReolinkResponse>, serde_json::Error> =
+                        serde_json::from_str(&a);
+                    match res {
+                        Ok(data_list) => {
+                            if let Some(event) = data_list.first() {
+                                let bouton = event
+                                    .value
+                                    .visitor
+                                    .as_ref()
+                                    .map(|s| s.alarm_state)
+                                    .unwrap_or(0);
+                                let humain = event
+                                    .value
+                                    .ai
+                                    .as_ref()
+                                    .and_then(|a| a.people.as_ref())
+                                    .map(|p| p.alarm_state)
+                                    .unwrap_or(0);
+
+                                if bouton == 1 {
+                                    println!("🔔 SONNETTE ! (Humain: {})", humain);
+                                    let _ =
+                                        self.enigo.button(enigo::Button::Left, Direction::Click);
+                                    let _ = std::process::Command::new("brightnessctl")
+                                        .arg("set")
+                                        .arg("100%")
+                                        .spawn();
+                                    sleep(Duration::from_secs(6)).await;
+                                }
+                            }
+                        }
+                        Err(e) => println!("JSON incomplet ou différent : {}", e),
+                    }
+                }
+                Err(e) => println!("Problème réseau : {}", e),
+            }
+            sleep(Duration::from_millis(300)).await;
         }
     }
 }
