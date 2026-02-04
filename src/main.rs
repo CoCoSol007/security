@@ -290,12 +290,18 @@ impl eframe::App for VideoApp {
             !i.events.is_empty() || i.pointer.any_click() || i.pointer.delta().length() > 0.0
         });
 
-        let wakeup_received = match self.wakeup_rx.try_recv() {
-            Ok(_) => true,
-            Err(_) => false,
-        };
+        if let Ok(_) = self.wakeup_rx.try_recv() {
+            println!("App réveillée par la sonnette !");
+            self.last_activity = Instant::now();
+            if self.is_down {
+                if let Some(sender) = self.running_sender.get(&self.current_url) {
+                    let _ = sender.send(true);
+                    self.is_down = false;
+                }
+            }
+        }
 
-        if has_activity || wakeup_received {
+        if has_activity {
             if self.last_activity.elapsed().as_secs() >= SLEEP_TIME {
                 if let Some(sender) = self.running_sender.get(&self.current_url) {
                     let _ = sender.send(true);
